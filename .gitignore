@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+
+# Ignore specific folders
+OpenCV/
+Upwork project/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
