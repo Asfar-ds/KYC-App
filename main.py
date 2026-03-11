@@ -2,20 +2,28 @@ import streamlit as st
 import base64
 import os
 import json
-from dotenv import load_dotenv
+from groq import Groq
+
+import streamlit as st
+import base64
 from groq import Groq
 
 # ==========================
-# Load Environment Variables
+# Streamlit Page Config
 # ==========================
-load_dotenv()
-api_key = os.getenv("GROQ_API_KEY")
+st.set_page_config(page_title="KYC Vision Verification", layout="centered")
+
+# ==========================
+# Load API Key from Secrets
+# ==========================
+api_key = st.secrets.get("GROQ_API_KEY")
 
 if not api_key:
-    st.error("GROQ_API_KEY not found")
+    st.error("GROQ_API_KEY not found in Streamlit secrets.")
     st.stop()
 
 client = Groq(api_key=api_key)
+
 
 # ==========================
 # Helper: Normalize Booleans
