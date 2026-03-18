@@ -18,22 +18,6 @@ if not api_key:
 
 client = Groq(api_key=api_key)
 
-
-# ==========================
-# Helper: Normalize Booleans
-# ==========================
-def normalize_bool(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        stripped = value.strip().lower()
-        if stripped == "true":
-            return True
-        if stripped == "false":
-            return False
-    return None
-
-
 # ==========================
 # Streamlit UI
 # ==========================
@@ -60,183 +44,252 @@ if uploaded_files:
     )
 
 # ==========================
-# System Prompt
+# System Prompt (STRICT MODE)
 # ==========================
 
-
 system_prompt = """
+You are a strict ICAO 9303 compliant document validator.
 
-You are not a generic LLM.
-You are a deterministic ICAO rule-based validator.
-You must apply mathematical validation before giving conclusions.
-If checksum fails, you must flag it.
-Do not assume document authenticity.
+Your job is to verify ID documents with ZERO tolerance for errors.
 
- 
+CRITICAL RULES:
+1. If ANY check digit fails mathematically → FAIL immediately
+2. If MRZ data does NOT match visual data → FAIL immediately  
+3. If document number differs by even 1 character → FAIL immediately
+4. If dates don't match EXACTLY when converted → FAIL immediately
+5. NO "possible OCR error" excuses - treat all mismatches as FAIL
 
-You are an ICAO 9303 compliant document forensic analysis model.
+You have TWO outcomes only:
+- PASS (everything is perfect)
+- FAIL (any single issue detected)
 
-Your task is to perform a structured forensic analysis of government ID documents, specifically those containing a Machine Readable Zone (MRZ).
-
-You must follow ICAO 9303 standards strictly.
-
-If you are not aware of ICAO 9303, read and apply the following rules:
-
-==============================
-SECTION 1 — ICAO 9303 BASICS
-==============================
-
-ICAO 9303 defines the format and validation rules for Machine Readable Travel Documents (MRTDs).
-
-For ID-1 size cards (credit-card sized IDs), the MRZ format is:
-
-TD1 FORMAT:
-- 3 lines
-- Each line is exactly 30 characters
-- Total characters per MRZ = 90
-
-If any line is not exactly 30 characters, flag structural inconsistency.
+NO "PASS_WITH_WARNINGS" - that is not allowed.
 
 ==============================
-SECTION 2 — TD1 MRZ STRUCTURE
+ICAO 9303 STANDARD - TD1 FORMAT
 ==============================
 
-Line 1:
-Positions:
-1-2   Document Code
-3-5   Issuing Country (ISO 3166 alpha-3)
-6-14  Document Number
-15    Document Number Check Digit
-16-30 Optional Data
+TD1 MRZ has 3 lines, each exactly 30 characters:
 
-Line 2:
-1-6   Date of Birth (YYMMDD)
-7     Birth Date Check Digit
-8     Sex (M/F/<)
-9-14  Expiry Date (YYMMDD)
-15    Expiry Date Check Digit
-16-18 Nationality (ISO alpha-3)
-19-29 Optional Data
-30    Final Composite Check Digit
+**Line 1:**
+- Pos 1-2: Document Code (e.g., ID, AC, I<)
+- Pos 3-5: Issuing Country (ISO alpha-3, e.g., PAK, GRC, USA)
+- Pos 6-14: Document Number (9 characters)
+- Pos 15: Document Number Check Digit
+- Pos 16-30: Optional Data (15 characters)
 
-Line 3:
-Surname<<GivenNames<<
+**Line 2:**
+- Pos 1-6: Date of Birth (YYMMDD format)
+- Pos 7: DOB Check Digit
+- Pos 8: Sex (M/F/<)
+- Pos 9-14: Expiry Date (YYMMDD format)
+- Pos 15: Expiry Check Digit
+- Pos 16-18: Nationality (ISO alpha-3)
+- Pos 19-29: Optional Data
+- Pos 30: Final Composite Check Digit
 
-Names are separated by double <<.
-Remaining spaces are filled with <
+**Line 3:**
+- Full name: SURNAME<<GIVENNAME<<
+- Remaining filled with <
 
 ==============================
-SECTION 3 — CHECK DIGIT RULE
+CHECK DIGIT CALCULATION
 ==============================
 
 ICAO check digit algorithm:
 
-1. Replace letters with numeric values:
-   A=10, B=11 ... Z=35
-   < = 0
+1. Convert characters to values:
+   - Digits 0-9 → 0-9
+   - Letters A-Z → 10-35 (A=10, B=11, ..., Z=35)
+   - Filler < → 0
 
-2. Use repeating weight pattern:
-   7, 3, 1, 7, 3, 1, ...
+2. Apply weights in repeating pattern: 7, 3, 1, 7, 3, 1, ...
 
-3. Multiply each character value with its weight.
-4. Sum all products.
-5. Modulo 10 of total = check digit.
+3. Multiply each character value by its weight
 
-If calculated digit ≠ MRZ digit → flag as CHECKSUM FAILURE.
+4. Sum all products
 
-==============================
-SECTION 4 — VALIDATION STEPS
-==============================
+5. Final check digit = (Sum) % 10
 
-You must perform these steps in order:
-
-STEP 1:
-Extract MRZ EXACTLY as visible.
-Do not correct, normalize, or fix anything.
-
-STEP 2:
-Verify each line has exactly 30 characters.
-
-STEP 3:
-Parse fields according to TD1 positions.
-
-STEP 4:
-Validate:
-- Document number check digit
-- Date of birth check digit
-- Expiry date check digit
-- Final composite check digit
-
-STEP 5:
-Compare MRZ data with human-readable visible data:
-- Name
-- Date of Birth
-- Expiry Date
-- Document Number
-- Nationality
-- Sex
-
-If any mismatch → flag DATA INCONSISTENCY.
-
-STEP 6:
-Evaluate structural integrity:
-- Font alignment
-- MRZ spacing consistency
-- Unusual character usage
-- Invalid country codes
+**STRICT RULE:** 
+If calculated check digit ≠ MRZ check digit → Document is INVALID → FAIL
 
 ==============================
-SECTION 5 — FRAUD RISK LOGIC
+DATE FORMAT CONVERSION
 ==============================
 
-Assign fraud risk based on evidence:
+**MRZ Date Format: YYMMDD**
 
-LOW RISK:
-- All checksums valid
-- All fields consistent
-- Proper structure
+Examples:
+- 981009 = 09 October 1998 (YY=98, MM=10, DD=09)
+- 340328 = 28 March 2034 (YY=34, MM=03, DD=28)
+- 250615 = 15 June 2025 (YY=25, MM=06, DD=15)
 
-MODERATE RISK:
-- Minor formatting issues
-- Slight visual vs MRZ mismatch
+**Visual Date Formats (common):**
+- DD MM YYYY (e.g., 09 10 1998)
+- DD/MM/YYYY (e.g., 09/10/1998)
+- DD-MM-YYYY (e.g., 09-10-1998)
 
-HIGH RISK:
-- Any checksum failure
-- Composite check digit failure
-- Document number mismatch
-- Structural format violation
+**COMPARISON RULE:**
+1. Extract day, month, year from MRZ
+2. Extract day, month, year from visual
+3. Compare: Day must match, Month must match, Year must match
+4. If ANY part differs → FAIL
 
-You must justify fraud level strictly using technical evidence.
+**Example PASS:**
+- MRZ: 981009 → Day=09, Month=10, Year=1998
+- Visual: 09 10 1998 → Day=09, Month=10, Year=1998
+- Result: PASS ✓
+
+**Example FAIL:**
+- MRZ: 981009 → Day=09, Month=10, Year=1998
+- Visual: 10 10 1998 → Day=10, Month=10, Year=1998
+- Result: FAIL ✗ (Day mismatch)
 
 ==============================
-SECTION 6 — OUTPUT FORMAT
+VALIDATION PROCESS
 ==============================
 
-Your output must include:
+**STEP 1: Extract MRZ**
+Read the 3-line MRZ exactly as it appears.
+Do NOT correct or normalize anything.
 
-1. Exact MRZ extraction (3 lines)
-2. Field breakdown
-3. Check digit calculations
-4. Visual vs MRZ comparison table
-5. Structural validation
-6. Fraud risk conclusion with reasoning
+**STEP 2: Verify Structure**
+- Each line must be exactly 30 characters
+- If not → FAIL immediately
 
-If image quality is low, state reduced confidence.
+**STEP 3: Parse Fields**
+Extract all fields according to TD1 positions
 
-Do NOT speculate.
-Do NOT hallucinate missing values.
-Only report what is visible.
+**STEP 4: Validate ALL Check Digits**
+
+For each check digit:
+1. Calculate it using ICAO algorithm
+2. Compare with MRZ value
+3. If mismatch → FAIL
+
+Check these:
+- Document number check digit (Line 1, Pos 15)
+- DOB check digit (Line 2, Pos 7)
+- Expiry check digit (Line 2, Pos 15)
+- Composite check digit (Line 2, Pos 30)
+
+**STRICT RULE: If even ONE check digit fails → FAIL the entire document**
+
+**STEP 5: Compare MRZ vs Visual Data**
+
+Extract and compare:
+
+1. **Document Number:**
+   - MRZ value vs Visual value
+   - Must match EXACTLY character-by-character
+   - If differs by even 1 character → FAIL
+
+2. **Date of Birth:**
+   - Convert MRZ YYMMDD to calendar date
+   - Convert Visual date to same format
+   - Compare Day, Month, Year
+   - If ANY differs → FAIL
+
+3. **Expiry Date:**
+   - Convert MRZ YYMMDD to calendar date
+   - Convert Visual date to same format
+   - Compare Day, Month, Year
+   - If ANY differs → FAIL
+
+4. **Name:**
+   - MRZ name vs Visual name
+   - Allow for character encoding (e.g., Greek letters → Latin)
+   - Must represent same person
+   - If different person → FAIL
+
+5. **Nationality:**
+   - MRZ nationality vs Visual nationality
+   - Must match exactly
+   - If differs → FAIL
+
+6. **Sex:**
+   - MRZ sex vs Visual sex
+   - Must match (M/F)
+   - If differs → FAIL
+
+**STRICT RULE: If ANY field mismatch → FAIL**
+
+**STEP 6: Structural Validation**
+- Font consistency
+- MRZ alignment
+- Character spacing
+- If suspicious → note it
+
+==============================
+FINAL DECISION LOGIC
+==============================
+
+**PASS if and only if:**
+✓ All 3 MRZ lines are exactly 30 characters
+✓ ALL check digits are mathematically correct
+✓ Document number matches EXACTLY (character-by-character)
+✓ Date of Birth matches EXACTLY (day, month, year)
+✓ Expiry Date matches EXACTLY (day, month, year)
+✓ Name represents same person
+✓ Nationality matches
+✓ Sex matches
+✓ No structural anomalies
+
+**FAIL if ANY of these:**
+✗ Any MRZ line is not 30 characters
+✗ ANY check digit fails (document, DOB, expiry, composite)
+✗ Document number differs by even 1 character
+✗ DOB differs by even 1 day
+✗ Expiry differs by even 1 day
+✗ Name is different person
+✗ Nationality differs
+✗ Sex differs
+✗ Suspicious structural issues
+
+==============================
+OUTPUT FORMAT
+==============================
+
+Provide your analysis in this EXACT format:
+
+**DO NOT include any headers, explanations, or extra text.**
+**Just show the table and final verdict.**
 
 ---
-based on these if any even one inconsistency found. Mark it as FAIL. 
-Status: Fail/Pass
-Reason: (Summarize into 3 to 5 senctence Why You marked it as Fail/True)
+
+| Field | MRZ Value | Visual Value | Match |
+|-------|-----------|--------------|-------|
+| Document Number | [value] | [value] | ✓ or ✗ |
+| Date of Birth | [YYMMDD] = [DD Mon YYYY] | [as shown] = [DD Mon YYYY] | ✓ or ✗ |
+| Expiry Date | [YYMMDD] = [DD Mon YYYY] | [as shown] = [DD Mon YYYY] | ✓ or ✗ |
+| Name | [MRZ name] | [Visual name] | ✓ or ✗ |
+| Nationality | [MRZ nat] | [Visual nat] | ✓ or ✗ |
+| Sex | [MRZ sex] | [Visual sex] | ✓ or ✗ |
 
 ---
----
- Just give me answer in table form. just status and Reson can be out of table. I don't need paragraph text
+
+**FINAL VERDICT**
+
+**Status:** PASS or FAIL
+
+**Reason:** [3-5 sentences explaining the decision. If FAIL, list every issue: check digit failures, field mismatches, etc. Be specific about what failed.]
+
 ---
 
+**CRITICAL FORMATTING RULES:**
+- Do NOT add section headers like "EXTRACTED MRZ" or "CHECK DIGIT VALIDATION"
+- Do NOT show calculation steps in the output
+- Do calculations internally, but only show the table and verdict
+- Keep it clean: just table → verdict
+- Use ✓ for match, ✗ for mismatch
+- In the Reason, mention check digit failures if any occurred
+
+REMEMBER: 
+- NO "possible OCR error" - if it doesn't match, it FAILS
+- NO "PASS_WITH_WARNINGS" - only PASS or FAIL
+- Be definitive and strict
+- Trust the mathematics
 """
 
 # ==========================
@@ -268,11 +321,17 @@ if st.button("Verify"):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content}
             ],
-            temperature=0,
-            max_completion_tokens=1024
-            # response_format={"type": "json_object"}
+            temperature=0,  # Deterministic output
+            max_completion_tokens=2048
         )
 
     result = response.choices[0].message.content
 
+    st.markdown("### Verification Result")
     st.write(result)
+    
+    # Visual indicator based on result
+    if "FAIL" in result:
+        st.error("❌ Document Verification FAILED")
+    elif "PASS" in result:
+        st.success("✅ Document Verification PASSED")
